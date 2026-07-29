@@ -32,6 +32,9 @@ interface MessengerListener {
 
     /** Alguien nos agregó y quedó dado de alta automáticamente. */
     fun onContactAdded(contact: Contact) {}
+
+    /** El otro extremo pidió borrar la conversación y se ha borrado. */
+    fun onHistoryDeletedByPeer(chatId: String, chatName: String) {}
 }
 
 /**
@@ -494,6 +497,18 @@ class Messenger(
                 return
             }
 
+            if (parsed.kind == Kind.DELETE_HISTORY) {
+                val chatId = parsed.groupId.ifBlank { senderFp }
+                val chatName = groups.get(parsed.groupId)?.name
+                    ?: senderName.ifBlank { "Sin nombre" }
+                clearHistory(chatId)
+                // Se avisa a propósito: que te borren tu copia sin que lo sepas
+                // sería peor que no poder borrarla.
+                listeners.forEach { it.onHistoryDeletedByPeer(chatId, chatName) }
+                Log.d(TAG, "historial de $chatId borrado a petición del otro extremo")
+                return
+            }
+
             if (!parsed.kind.usesRatchet) {
                 route(parsed.kind, senderContact, senderFp, senderName, assembled, parsed)
                 return
@@ -694,6 +709,47 @@ class Messenger(
         messages.clear(group.id)
         prefs.forget(group.id)
         notifyStateChanged()
+    }
+
+    /**
+     * Borra el historial de una conversación en **este** dispositivo:
+     * mensajes, fotos y audios. Conserva el contacto y la sesión de cifrado,
+     * así que se puede seguir hablando.
+     */
+    fun clearHistory(chatId: String) {
+        messages.load(chatId)
+            .mapNotNull { it.mediaId.takeIf(String::isNotEmpty) }
+            .forEach { vault.delete(it) }
+        messages.clear(chatId)
+        notifyStateChanged()
+    }
+
+    /**
+     * Pide al otro extremo que borre también su copia de la conversación.
+     *
+     * Funciona porque ejecuta esta misma app y decide obedecer. Contra un
+     * cliente modificado, o contra una captura de pantalla ya hecha, no hay
+     * nada que hacer: eso no lo resuelve ninguna mensajería.
+     */
+    fun requestRemoteDeletion(chatId: String): Boolean {
+        val group = groups.get(chatId)
+        if (group != null) {
+            return dispatchToGroupRaw(group, Kind.DELETE_HISTORY, ByteArray(0))
+        }
+        val contact = store.loadContacts().firstOrNull { it.fingerprint == chatId }
+            ?: return false
+        return dispatchRaw(contact, Kind.DELETE_HISTORY, ByteArray(0))
+    }
+
+    /** Difunde una orden de control a todos los miembros, sin pasar por el ratchet. */
+    private fun dispatchToGroupRaw(group: Group, kind: Kind, payload: ByteArray): Boolean {
+        var anyOk = false
+        group.recipients(myFingerprint).forEach { member ->
+            runCatching {
+                if (dispatchRaw(member.toContact(), kind, payload, group.id)) anyOk = true
+            }
+        }
+        return anyOk
     }
 
     /**

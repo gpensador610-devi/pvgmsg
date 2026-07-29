@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -23,14 +24,92 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+
+/**
+ * Confirmación antes de borrar, con la opción de pedirlo también al otro lado.
+ *
+ * El texto es explícito sobre el límite real: el borrado remoto funciona
+ * porque la otra app coopera, no porque se pueda imponer.
+ */
+@Composable
+private fun ClearHistoryDialog(
+    isGroup: Boolean,
+    peerName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (alsoRemote: Boolean) -> Unit,
+) {
+    var alsoRemote by remember { mutableStateOf(false) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    "¿Borrar el historial?",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    "Se borrarán los mensajes, fotos y audios de esta conversación " +
+                        "en este teléfono. El chat y el contacto se mantienen.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { alsoRemote = !alsoRemote },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = alsoRemote, onCheckedChange = { alsoRemote = it })
+                    Spacer(Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            if (isGroup) "Borrar también para todo el grupo"
+                            else "Borrar también en el teléfono de $peerName",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+                }
+                if (alsoRemote) {
+                    Text(
+                        "Funciona porque su app obedece la petición. No puede hacer nada " +
+                            "contra una captura de pantalla ya hecha ni contra una app " +
+                            "modificada: eso no lo resuelve ninguna mensajería.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancelar") }
+                    TextButton(onClick = { onConfirm(alsoRemote) }) {
+                        Text("Borrar", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+    }
+}
 
 /** Rejilla de opciones de autodestrucción, en filas de tres. */
 @Composable
@@ -70,11 +149,25 @@ fun ChatSettingsScreen(
     onPickSound: () -> Unit,
     onToggleBlock: () -> Unit,
     onLeaveGroup: () -> Unit,
-    onClearHistory: () -> Unit,
+    /** El booleano indica si además hay que pedir el borrado al otro extremo. */
+    onClearHistory: (alsoRemote: Boolean) -> Unit,
     onResetSession: () -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
+    var confirmingClear by remember { mutableStateOf(false) }
+
+    if (confirmingClear) {
+        ClearHistoryDialog(
+            isGroup = isGroup,
+            peerName = title,
+            onDismiss = { confirmingClear = false },
+            onConfirm = { alsoRemote ->
+                confirmingClear = false
+                onClearHistory(alsoRemote)
+            },
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -235,7 +328,7 @@ fun ChatSettingsScreen(
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(onClick = onClearHistory),
+                            .clickable { confirmingClear = true },
                     )
                     HorizontalDivider()
                     if (!isGroup) {

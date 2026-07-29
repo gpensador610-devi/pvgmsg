@@ -146,6 +146,11 @@ class MainActivity : FragmentActivity() {
             refreshTick.longValue++
         }
 
+        override fun onHistoryDeletedByPeer(chatId: String, chatName: String) = runOnUiThread {
+            toast("$chatName borró la conversación también en tu teléfono")
+            refreshTick.longValue++
+        }
+
         // El enrutado de las señales de llamada lo hace PrivMsgService, que
         // sigue vivo aunque esta pantalla no exista.
     }
@@ -735,6 +740,27 @@ class MainActivity : FragmentActivity() {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
+    /**
+     * Pide confirmar identidad antes de enseñar la frase de recuperación.
+     *
+     * Con la app ya abierta, cualquiera que agarre el teléfono podría verla y
+     * fotografiarla: esas 12 palabras son la identidad entera. Se acepta huella
+     * o el desbloqueo del teléfono; si el dispositivo no tiene ninguno, se
+     * avisa en vez de bloquear al dueño fuera de su propia frase.
+     */
+    private fun verifyOwnerThen(action: () -> Unit) {
+        Biometrics.confirmOwner(
+            activity = this,
+            title = "Confirma que eres tú",
+            subtitle = "Vas a ver tu frase de recuperación",
+            onConfirmed = { runOnUiThread(action) },
+            onUnavailable = {
+                toast("Sin bloqueo de pantalla no se puede verificar. Actívalo en Ajustes de Android.")
+                runOnUiThread(action)
+            },
+        )
+    }
+
 
     // ---------- UI ----------
 
@@ -942,7 +968,7 @@ class MainActivity : FragmentActivity() {
                 onEditProfile = { editingProfile = true },
                 onChangePhoto = { choosingProfilePhoto = true },
                 onShowQr = { showQr = true },
-                onShowMnemonic = { showMnemonic = true },
+                onShowMnemonic = { verifyOwnerThen { showMnemonic = true } },
                 onPickDefaultSound = { pickSound(null) },
                 onExportBackup = {
                     launchExternal { backupExporter.launch(BackupManager.suggestedFileName()) }
@@ -985,10 +1011,20 @@ class MainActivity : FragmentActivity() {
                         group?.let { messenger.leaveGroup(it) }
                         screen = Screen.ChatList
                     },
-                    onClearHistory = {
-                        msgStore.clear(chatId)
+                    onClearHistory = { alsoRemote ->
+                        messenger.clearHistory(chatId)
+                        if (alsoRemote) {
+                            ioScope.launch {
+                                val ok = messenger.requestRemoteDeletion(chatId)
+                                toast(
+                                    if (ok) "Historial borrado aquí y solicitado al otro lado"
+                                    else "Borrado aquí; sin conexión para avisar al otro lado",
+                                )
+                            }
+                        } else {
+                            toast("Historial borrado")
+                        }
                         refreshTick.longValue++
-                        toast("Historial borrado")
                     },
                     onResetSession = {
                         messenger.ratchets.clear(chatId)

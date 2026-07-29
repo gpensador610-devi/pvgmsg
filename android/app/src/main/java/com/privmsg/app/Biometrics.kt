@@ -22,6 +22,56 @@ object Biometrics {
         BiometricManager.from(context).canAuthenticate(AUTHENTICATORS) ==
             BiometricManager.BIOMETRIC_SUCCESS
 
+    /**
+     * Confirma que quien tiene el teléfono es su dueño, antes de enseñar algo
+     * crítico (la frase de recuperación).
+     *
+     * Acepta huella **o** el desbloqueo del propio teléfono, así que funciona
+     * aunque no haya sensor biométrico. Si el dispositivo no tiene ningún
+     * bloqueo configurado, no hay nada que verificar y se avisa.
+     */
+    fun confirmOwner(
+        activity: FragmentActivity,
+        title: String,
+        subtitle: String,
+        onConfirmed: () -> Unit,
+        onUnavailable: () -> Unit,
+        onCancelled: () -> Unit = {},
+    ) {
+        val allowed = BiometricManager.Authenticators.BIOMETRIC_WEAK or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+
+        if (BiometricManager.from(activity).canAuthenticate(allowed) !=
+            BiometricManager.BIOMETRIC_SUCCESS
+        ) {
+            onUnavailable()
+            return
+        }
+
+        val prompt = BiometricPrompt(
+            activity,
+            ContextCompat.getMainExecutor(activity),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    onConfirmed()
+                }
+
+                override fun onAuthenticationError(code: Int, message: CharSequence) {
+                    onCancelled()
+                }
+            },
+        )
+
+        prompt.authenticate(
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle(title)
+                .setSubtitle(subtitle)
+                .setAllowedAuthenticators(allowed)
+                .setConfirmationRequired(true)
+                .build(),
+        )
+    }
+
     /** Muestra el diálogo del sistema. Los fallos se ignoran: queda el PIN. */
     fun prompt(
         activity: FragmentActivity,

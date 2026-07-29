@@ -39,13 +39,27 @@ enum class Kind {
      * pareja: es el único mensaje que puede llegar a alguien que todavía no
      * tiene nuestra clave y por tanto no sabría dónde escuchar.
      */
-    CONTACT_REQUEST;
+    CONTACT_REQUEST,
+
+    /**
+     * "Borra esta conversación también en tu teléfono."
+     *
+     * Es **cooperativa**: funciona porque el otro extremo ejecuta esta misma
+     * app y decide obedecer. Nada puede obligar a un cliente modificado, ni
+     * recuperar una captura de pantalla ya hecha. La app no finge lo contrario.
+     */
+    DELETE_HISTORY;
 
     val isCallSignal: Boolean
         get() = this == CALL_OFFER || this == CALL_ANSWER || this == CALL_END
 
     val isGroupControl: Boolean
         get() = this == GROUP_INVITE || this == GROUP_UPDATE || this == GROUP_LEAVE
+
+    /** Órdenes que no llevan contenido y no se muestran como mensaje. */
+    val isControl: Boolean
+        get() = isGroupControl || isCallSignal || this == RATCHET_INIT ||
+            this == CONTACT_REQUEST || this == DELETE_HISTORY
 
     /** ¿Se muestra como burbuja en la conversación? */
     val isVisibleMessage: Boolean
