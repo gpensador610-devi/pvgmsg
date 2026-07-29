@@ -52,6 +52,7 @@ fun CallScreen(
         is CallState.Outgoing -> state.name
         is CallState.Incoming -> state.name
         is CallState.Active -> state.name
+        is CallState.Failed -> state.name
         CallState.Idle -> return
     }
 
@@ -99,21 +100,41 @@ fun CallScreen(
                     }
                 }
 
+                is CallState.Failed -> {
+                    Text(
+                        state.reason,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center,
+                    )
+                    state.hint?.let {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                    }
+                }
+
                 CallState.Idle -> Unit
             }
 
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "🔒 Cifrada de extremo a extremo",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                fingerprint,
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.Center,
-            )
+            if (state !is CallState.Failed) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "🔒 Cifrada de extremo a extremo",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    fingerprint,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                )
+            }
 
             Spacer(Modifier.weight(1f))
 
@@ -163,6 +184,15 @@ fun CallScreen(
                         tint = Color.White,
                         size = 68,
                         onClick = onAccept,
+                    )
+                } else if (state is CallState.Failed) {
+                    CallButton(
+                        icon = AppIcons.CallEnd,
+                        label = "Cerrar",
+                        background = MaterialTheme.colorScheme.secondaryContainer,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        size = 68,
+                        onClick = onHangup,
                     )
                 } else {
                     CallButton(

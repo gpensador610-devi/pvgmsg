@@ -863,6 +863,7 @@ class MainActivity : FragmentActivity() {
                 is CallState.Active -> callState.contact.fingerprint
                 else -> ""
             }
+            val failed = callState is CallState.Failed
             CallScreen(
                 state = callState,
                 fingerprint = callFp,
@@ -871,7 +872,10 @@ class MainActivity : FragmentActivity() {
                 speakerOn = calls.speakerOn.value,
                 connected = calls.peerConnected.value,
                 onAccept = { acceptCallWithPermission() },
-                onHangup = { NotificationHelper.cancelCall(this); calls.endCall() },
+                onHangup = {
+                    NotificationHelper.cancelCall(this)
+                    if (failed) calls.dismissFailure() else calls.endCall()
+                },
                 onToggleMute = { calls.toggleMute() },
                 onToggleSpeaker = { calls.toggleSpeaker() },
             )

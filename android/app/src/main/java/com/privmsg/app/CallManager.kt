@@ -19,6 +19,13 @@ sealed interface CallState {
     data class Outgoing(val contact: Contact, val name: String) : CallState
     data class Incoming(val contact: Contact, val name: String) : CallState
     data class Active(val contact: Contact, val name: String, val startedAt: Long) : CallState
+
+    /**
+     * La llamada no salió adelante. Se muestra el motivo en vez de volver sin
+     * más a la lista de chats: una llamada que se corta sin explicación deja
+     * al usuario sin saber si el fallo es suyo, del otro o de la red.
+     */
+    data class Failed(val name: String, val reason: String, val hint: String?) : CallState
 }
 
 /**
@@ -80,7 +87,29 @@ class CallManager(
         }
 
         state.value = CallState.Outgoing(contact, displayName)
+
+        // Sin esto, una llamada sin respuesta se quedaba sonando para siempre.
+        Thread({
+            Thread.sleep(RING_TIMEOUT_MS)
+            if (state.value is CallState.Outgoing) {
+                Log.d(TAG, "nadie contestó")
+                runCatching { sendSignal(contact, Kind.CALL_END, ByteArray(0)) }
+                failCall(displayName, "No contestó", null)
+            }
+        }, "call-ring-timeout").start()
+
         return true
+    }
+
+    /** Corta la llamada y deja el motivo a la vista. */
+    private fun failCall(name: String, reason: String, hint: String?) {
+        cleanup()
+        state.value = CallState.Failed(name, reason, hint)
+    }
+
+    /** Cierra la pantalla de fallo y vuelve a la normalidad. */
+    fun dismissFailure() {
+        if (state.value is CallState.Failed) state.value = CallState.Idle
     }
 
     /** Llega una invitación: guardamos el secreto y hacemos sonar el timbre. */
@@ -147,7 +176,8 @@ class CallManager(
             is CallState.Outgoing -> s.contact
             is CallState.Incoming -> s.contact
             is CallState.Active -> s.contact
-            CallState.Idle -> null
+            // Ya se cortó: no hay a quién avisar de nuevo.
+            is CallState.Failed, CallState.Idle -> null
         } ?: pendingContact
         contact?.let { sendSignal(it, Kind.CALL_END, ByteArray(0)) }
         cleanup()
@@ -192,8 +222,14 @@ class CallManager(
                 Thread.sleep(300)
             }
             if (transport?.connected != true) {
-                Log.w(TAG, "no se pudo conectar (NAT simétrico probablemente)")
-                endCall()
+                Log.w(TAG, "sin ruta directa para la voz")
+                failCall(
+                    name,
+                    "No se pudo establecer la conexión de voz",
+                    "La voz viaja directa entre los dos teléfonos, sin pasar por " +
+                        "ningún servidor. Algunas redes lo impiden: es habitual con " +
+                        "datos móviles y con emuladores. En la misma WiFi suele funcionar.",
+                )
             }
         }, "call-watchdog").start()
     }
@@ -252,5 +288,8 @@ class CallManager(
     private companion object {
         const val TAG = "CallManager"
         const val CONNECT_TIMEOUT_MS = 25_000L
+
+        /** Cuánto suena antes de darla por no contestada. */
+        const val RING_TIMEOUT_MS = 45_000L
     }
 }
