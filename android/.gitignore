@@ -1,0 +1,13 @@
+# NUNCA versionar la clave de firma ni sus contraseñas.
+# Si esto se filtra, cualquiera puede publicar actualizaciones que los
+# teléfonos de tus contactos aceptarán como legítimas.
+keystore.properties
+*.jks
+*.keystore
+
+local.properties
+.gradle/
+build/
+.idea/
+*.iml
+.DS_Store

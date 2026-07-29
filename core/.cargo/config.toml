@@ -1,0 +1,6 @@
+# El path del proyecto contiene caracteres no-ASCII ("Área") que rompen
+# dlltool/binutils del toolchain windows-gnu. Compilamos fuera de OneDrive,
+# en una ruta 100% ASCII (esto además evita que OneDrive sincronice los
+# artefactos de build, que pesan cientos de MB).
+[build]
+target-dir = "C:/dev-builds/privmsg-core-target"

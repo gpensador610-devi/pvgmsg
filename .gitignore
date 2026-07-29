@@ -1,0 +1,30 @@
+# ─── NUNCA versionar la clave de firma ni sus contraseñas ───────────────
+# Si esto se filtra, cualquiera puede publicar actualizaciones que los
+# teléfonos de tus contactos aceptarán como legítimas. No hay revocación.
+keystore.properties
+*.jks
+*.keystore
+*.p12
+
+# Copias de seguridad de la app (contienen historial completo)
+*.privmsg
+
+# ─── Build ──────────────────────────────────────────────────────────────
+build/
+.gradle/
+local.properties
+target/
+*.apk
+*.aab
+
+# Bindings generados por UniFFI y librerías nativas: salen de `core/`,
+# se regeneran con scripts/build-core.ps1
+android/app/src/main/java/uniffi/
+android/app/src/main/jniLibs/
+
+# ─── Editores y sistema ─────────────────────────────────────────────────
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db

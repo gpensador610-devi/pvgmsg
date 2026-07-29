@@ -1,0 +1,47 @@
+[package]
+name = "privmsg-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "privmsg_core"
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+uniffi = { version = "0.29", features = ["cli"] }
+
+# Criptografía clásica
+x25519-dalek = { version = "2", features = ["static_secrets", "getrandom"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Post-cuántica (NIST FIPS 203).
+# `deterministic` habilita keygen desde semilla: lo necesita la frase de 12 palabras.
+ml-kem = { version = "0.2", features = ["deterministic"] }
+
+rand = "0.8"
+base64 = "0.22"
+zeroize = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+# Transporte por relays públicos (eventos firmados BIP-340)
+k256 = { version = "0.13", features = ["schnorr"] }
+serde_json = "1"
+hex = "0.4"
+
+# Frase de recuperación de 12 palabras (estándar de wallets)
+bip39 = "2"
+
+# Derivación de clave desde contraseña para la copia de seguridad
+argon2 = "0.5"
+
+[profile.release]
+lto = true
+opt-level = 3
+strip = "debuginfo"
