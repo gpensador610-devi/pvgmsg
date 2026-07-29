@@ -54,6 +54,33 @@ pub fn rendezvous_tag(identity: Identity, contact: Contact, day: u64) -> Result<
     Ok(hex::encode(okm))
 }
 
+/// Buzón personal: etiqueta derivada **solo** de la clave pública propia.
+///
+/// Existe para resolver el problema del primer contacto. Las etiquetas de
+/// encuentro normales salen del secreto compartido entre dos personas, así que
+/// para escuchar a alguien hay que tener ya su clave: si solo uno agrega al
+/// otro, el segundo ni siquiera sabe en qué buzón mirar.
+///
+/// Este buzón lo puede calcular **cualquiera que tenga tu invitación**, y es
+/// donde llegan las solicitudes de contacto. Sirve únicamente para ese primer
+/// saludo; en cuanto ambos se conocen, la conversación pasa a las etiquetas
+/// por pareja, que rotan a diario.
+///
+/// El precio en privacidad es acotado y consciente: quien tenga tu invitación
+/// puede ver que te llegan solicitudes, pero no de quién ni qué dicen.
+#[uniffi::export]
+pub fn personal_tag(x25519_public: Vec<u8>) -> Result<String, CoreError> {
+    if x25519_public.len() != 32 {
+        return Err(CoreError::InvalidKey {
+            reason: "clave X25519 inválida para el buzón personal".into(),
+        });
+    }
+    let hk = Hkdf::<Sha256>::new(Some(b"privmsg-v1-personal-inbox"), &x25519_public);
+    let mut okm = [0u8; 16];
+    hk.expand(b"inbox", &mut okm).expect("16 bytes válidos");
+    Ok(hex::encode(okm))
+}
+
 /// Construye un evento Nostr firmado (JSON) que transporta `sealed` bajo la
 /// etiqueta `tag`. Usa una clave de firma aleatoria de un solo uso.
 #[uniffi::export]
@@ -114,6 +141,32 @@ mod tests {
         let carol = generate_identity();
         let c = rendezvous_tag(carol, contact_of(&bob), 20_000).unwrap();
         assert_ne!(a_to_b, c);
+    }
+
+    #[test]
+    fn el_buzon_personal_lo_calculan_ambos_lados() {
+        let bob = generate_identity();
+
+        // Bob lo deriva de su propia clave; Alice, de la que Bob le dio en la
+        // invitacion. Tienen que coincidir o el primer contacto no llegaria.
+        let desde_bob = personal_tag(bob.x25519_public.clone()).unwrap();
+        let desde_invitacion = personal_tag(contact_of(&bob).x25519_public).unwrap();
+        assert_eq!(desde_bob, desde_invitacion);
+
+        // Y el de otra persona es distinto.
+        let carol = generate_identity();
+        assert_ne!(desde_bob, personal_tag(carol.x25519_public).unwrap());
+
+        // No se parece a la etiqueta de pareja: son espacios separados.
+        let alice = generate_identity();
+        let pareja = rendezvous_tag(alice, contact_of(&bob), 20_000).unwrap();
+        assert_ne!(desde_bob, pareja);
+    }
+
+    #[test]
+    fn el_buzon_personal_rechaza_claves_invalidas() {
+        assert!(personal_tag(vec![0u8; 16]).is_err());
+        assert!(personal_tag(vec![]).is_err());
     }
 
     #[test]

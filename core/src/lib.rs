@@ -33,6 +33,6 @@ pub use ratchet::{
     RatchetResult,
 };
 pub use recovery::{generate_mnemonic, identity_from_mnemonic, validate_mnemonic};
-pub use transport::{make_transport_event, rendezvous_tag};
+pub use transport::{make_transport_event, personal_tag, rendezvous_tag};
 
 uniffi::setup_scaffolding!();

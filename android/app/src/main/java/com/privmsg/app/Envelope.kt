@@ -30,7 +30,16 @@ enum class Kind {
      * Va protegido por el sobre híbrido post-cuántico, que es de donde el
      * ratchet hereda su resistencia cuántica.
      */
-    RATCHET_INIT;
+    RATCHET_INIT,
+
+    /**
+     * "Te agregué": lleva la invitación propia para que el alta sea mutua.
+     *
+     * Viaja al **buzón personal** del destinatario, no a la etiqueta de
+     * pareja: es el único mensaje que puede llegar a alguien que todavía no
+     * tiene nuestra clave y por tanto no sabría dónde escuchar.
+     */
+    CONTACT_REQUEST;
 
     val isCallSignal: Boolean
         get() = this == CALL_OFFER || this == CALL_ANSWER || this == CALL_END

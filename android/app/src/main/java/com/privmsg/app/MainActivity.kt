@@ -61,6 +61,9 @@ import uniffi.privmsg_core.inviteDecode
 import uniffi.privmsg_core.inviteEncode
 import uniffi.privmsg_core.validateMnemonic
 
+/** Marcador para distinguir la foto de perfil de una foto de chat. */
+private const val PROFILE_PHOTO_TARGET = "__perfil__"
+
 /** Copia de seguridad esperando a que el usuario escriba la contraseña. */
 private data class BackupPrompt(val uri: Uri, val exporting: Boolean)
 
@@ -112,6 +115,11 @@ class MainActivity : FragmentActivity() {
         override fun onMessage(chatId: String, chatName: String, msg: Msg, isGroup: Boolean) =
             runOnUiThread { refreshTick.longValue++ }
 
+        override fun onContactAdded(contact: Contact) = runOnUiThread {
+            toast("Alguien te agregó: ${contact.fingerprint}")
+            refreshTick.longValue++
+        }
+
         // El enrutado de las señales de llamada lo hace PrivMsgService, que
         // sigue vivo aunque esta pantalla no exista.
     }
@@ -152,6 +160,63 @@ class MainActivity : FragmentActivity() {
                 ) ?: run { toast("No se pudo leer la imagen"); return@launch }
                 sendMedia(chatId, Kind.IMAGE, jpeg, "jpg", 0L)
             }
+        }
+    }
+
+    /** Ruta donde la cámara del sistema deja la foto recién tomada. */
+    private var pendingCameraUri: Uri? = null
+
+    private val cameraLauncher = registerForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { taken ->
+        val uri = pendingCameraUri
+        val chatId = pendingAttachTarget
+        pendingCameraUri = null
+        pendingAttachTarget = null
+        if (!taken || uri == null || chatId == null) {
+            pickingProfilePhoto = false
+            return@registerForActivityResult
+        }
+
+        val forProfile = pickingProfilePhoto
+        pickingProfilePhoto = false
+
+        ioScope.launch {
+            val jpeg = if (forProfile) {
+                MediaVault.compressImage(
+                    this@MainActivity, uri, MediaVault.AVATAR_MAX_SIDE, MediaVault.AVATAR_QUALITY,
+                )
+            } else {
+                MediaVault.compressImage(
+                    this@MainActivity, uri, MediaVault.PHOTO_MAX_SIDE, MediaVault.PHOTO_QUALITY,
+                )
+            }
+            // La foto sin cifrar solo vive en caché el tiempo de comprimirla.
+            runCatching { java.io.File(cacheDir, "camera").listFiles()?.forEach { it.delete() } }
+
+            if (jpeg == null) {
+                toast("No se pudo procesar la foto")
+                return@launch
+            }
+            if (forProfile) {
+                store.setProfileAvatar(jpeg)
+                store.clearAvatarSent()
+                broadcastAvatar(jpeg)
+                messenger.notifyStateChanged()
+            } else {
+                sendMedia(chatId, Kind.IMAGE, jpeg, "jpg", 0L)
+            }
+        }
+    }
+
+    private val cameraPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            pendingAttachTarget?.let { launchCamera(it) }
+        } else {
+            pendingAttachTarget = null
+            toast("Sin permiso de cámara. Puedes enviar fotos desde la galería.")
         }
     }
 
@@ -209,6 +274,11 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // La app gestiona los margenes del sistema por su cuenta (Compose).
+        // Sin esto, Android ademas redimensiona la ventana al abrir el teclado
+        // y el efecto se duplica.
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+
         recorder = AudioRecorder(applicationContext)
         appLock = AppLock(applicationContext)
         locked.value = appLock.isEnabled
@@ -437,6 +507,21 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * Avisa al recién agregado enviándole nuestra invitación, para que el alta
+     * sea mutua. Sin esto solo funcionaría en un sentido: él no tendría
+     * nuestra clave y no sabría en qué buzón escuchar.
+     */
+    private fun announceTo(contact: Contact) {
+        ioScope.launch {
+            if (messenger.sendContactRequest(contact)) {
+                toast("Contacto añadido. Ya puede escribirte.")
+            } else {
+                toast("Contacto añadido, pero sin conexión para avisarle todavía")
+            }
+        }
+    }
+
     /** La primera vez que escribimos a alguien, le mandamos nuestra foto. */
     private fun ensureAvatarSent(contact: Contact) {
         if (contact.fingerprint == identity.fingerprint) return
@@ -467,10 +552,59 @@ class MainActivity : FragmentActivity() {
         photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
 
+    /**
+     * Abre la cámara del sistema para tomar una foto y enviarla.
+     *
+     * Aunque se use la cámara del sistema, Android exige el permiso concedido
+     * porque la app lo declara en el manifest (lo necesita el escáner de QR).
+     */
+    private fun takePhotoFor(chatId: String) {
+        pendingAttachTarget = chatId
+        pickingProfilePhoto = false
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            launchCamera(chatId)
+        } else {
+            cameraPermission.launch(android.Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun launchCamera(chatId: String) {
+        pendingAttachTarget = chatId
+        val result = runCatching {
+            val dir = java.io.File(cacheDir, "camera").apply { mkdirs() }
+            val file = java.io.File(dir, "shot_${System.currentTimeMillis()}.jpg")
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "$packageName.fileprovider", file,
+            )
+            pendingCameraUri = uri
+            cameraLauncher.launch(uri)
+        }
+        if (result.isFailure) {
+            pendingAttachTarget = null
+            pendingCameraUri = null
+            toast("No se pudo abrir la cámara")
+        }
+    }
+
     private fun pickProfilePhoto() {
         pendingAttachTarget = null
         pickingProfilePhoto = true
         photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
+
+    /** Foto de perfil tomada con la cámara en ese momento. */
+    private fun takeProfilePhoto() {
+        pickingProfilePhoto = true
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            launchCamera(PROFILE_PHOTO_TARGET)
+        } else {
+            pendingAttachTarget = PROFILE_PHOTO_TARGET
+            cameraPermission.launch(android.Manifest.permission.CAMERA)
+        }
     }
 
     private fun pickSound(chatId: String?) {
@@ -556,7 +690,17 @@ class MainActivity : FragmentActivity() {
         var settingUpPin by remember { mutableStateOf(false) }
         var settingUpDuress by remember { mutableStateOf(false) }
         var pastingInvite by remember { mutableStateOf(false) }
+        var choosingProfilePhoto by remember { mutableStateOf(false) }
         val tick by refreshTick
+
+        if (choosingProfilePhoto) {
+            PhotoSourceDialog(
+                title = "Foto de perfil",
+                onDismiss = { choosingProfilePhoto = false },
+                onCamera = { choosingProfilePhoto = false; takeProfilePhoto() },
+                onGallery = { choosingProfilePhoto = false; pickProfilePhoto() },
+            )
+        }
 
         // Crear o cambiar PIN: tapa la pantalla igual que el desbloqueo.
         if (settingUpPin) {
@@ -728,7 +872,7 @@ class MainActivity : FragmentActivity() {
                 },
                 onRequestBatteryExemption = { BackgroundPermissions.requestExemption(this) },
                 onEditProfile = { editingProfile = true },
-                onChangePhoto = { pickProfilePhoto() },
+                onChangePhoto = { choosingProfilePhoto = true },
                 onShowQr = { showQr = true },
                 onShowMnemonic = { showMnemonic = true },
                 onPickDefaultSound = { pickSound(null) },
@@ -812,7 +956,8 @@ class MainActivity : FragmentActivity() {
                         ttlLabel = prefs.settings(chatId).effectiveTtl
                             .takeIf { it != Ttl.OFF }?.label,
                         onSend = { sendText(chatId, it) },
-                        onAttachPhoto = { pickPhotoFor(chatId) },
+                        onPickPhoto = { pickPhotoFor(chatId) },
+                        onTakePhoto = { takePhotoFor(chatId) },
                         onToggleRecord = { toggleRecording(chatId) },
                         onPlayAudio = { playAudio(it) },
                         onCall = {
@@ -871,6 +1016,7 @@ class MainActivity : FragmentActivity() {
                         val contact = inviteDecode(text.trim())
                         if (store.addContact(contact)) {
                             messenger.refreshSubscriptions()
+                            announceTo(contact)
                             pastingInvite = false
                             namingFingerprint = contact.fingerprint
                         } else {
@@ -1055,6 +1201,7 @@ class MainActivity : FragmentActivity() {
         onContactScanned = { contact ->
             if (store.addContact(contact)) {
                 messenger.refreshSubscriptions()
+                announceTo(contact)
                 onAdded(contact.fingerprint)
             } else {
                 toast("Ese contacto ya existe")

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Rutas que la app comparte con la cámara del sistema para que deje ahí la
+    foto recién tomada. Solo una carpeta de caché nuestra: nada del historial
+    ni de los medios cifrados es accesible desde fuera.
+-->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>

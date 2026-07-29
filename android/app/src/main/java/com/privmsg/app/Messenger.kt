@@ -4,8 +4,11 @@ import android.content.Context
 import android.util.Log
 import uniffi.privmsg_core.Contact
 import uniffi.privmsg_core.Identity
+import uniffi.privmsg_core.inviteDecode
+import uniffi.privmsg_core.inviteEncode
 import uniffi.privmsg_core.makeTransportEvent
 import uniffi.privmsg_core.openMessage
+import uniffi.privmsg_core.personalTag
 import uniffi.privmsg_core.ratchetDecrypt
 import uniffi.privmsg_core.ratchetEncrypt
 import uniffi.privmsg_core.ratchetInitInitiator
@@ -26,6 +29,9 @@ interface MessengerListener {
 
     /** Señal de llamada entrante o de control. */
     fun onCallSignal(kind: Kind, contact: Contact, displayName: String, payload: ByteArray) {}
+
+    /** Alguien nos agregó y quedó dado de alta automáticamente. */
+    fun onContactAdded(contact: Contact) {}
 }
 
 /**
@@ -81,20 +87,84 @@ class Messenger(
 
     fun refreshSubscriptions() = nostr?.resubscribe()
 
-    /** Etiquetas de encuentro de hoy y ayer, para contactos y miembros de grupos. */
+    /**
+     * Etiquetas que vigilamos en los relays.
+     *
+     * Una por pareja (de hoy y de ayer, porque rotan a medianoche) y, además,
+     * **nuestro buzón personal**: sin él, alguien que nos agrega no tendría
+     * forma de avisarnos, porque nosotros no sabríamos en qué etiqueta mirar.
+     */
     private fun rendezvousTags(): List<String> {
         val today = System.currentTimeMillis() / 1000 / 86400
         val peers = (store.loadContacts() + groups.all().flatMap { group ->
             group.recipients(myFingerprint).map { it.toContact() }
         }).distinctBy { it.fingerprint }
 
-        return peers
+        val pairTags = peers
             .filter { it.fingerprint != identity.fingerprint }
             .flatMap { contact ->
                 listOf(today, today - 1).mapNotNull { day ->
                     runCatching { rendezvousTag(identity, contact, day.toULong()) }.getOrNull()
                 }
             }
+
+        val inbox = runCatching { personalTag(identity.x25519Public) }.getOrNull()
+        return pairTags + listOfNotNull(inbox)
+    }
+
+    /**
+     * Avisa a alguien de que lo hemos agregado, mandándole nuestra invitación.
+     *
+     * Va al buzón personal del destinatario porque todavía no nos conoce.
+     * Sin esto, agregar a alguien sería unilateral: podríamos escribirle, pero
+     * él no sabría dónde escuchar y nunca recibiría nada.
+     */
+    fun sendContactRequest(contact: Contact): Boolean {
+        val inbox = runCatching { personalTag(contact.x25519Public) }.getOrNull() ?: return false
+        val payload = inviteEncode(identity).toByteArray(Charsets.UTF_8)
+
+        val parts = Envelope.build(
+            senderFp = identity.fingerprint,
+            nickname = store.getProfileName(),
+            kind = Kind.CONTACT_REQUEST,
+            payload = payload,
+        )
+        var ok = false
+        parts.forEach { part ->
+            runCatching {
+                val sealed = sealMessage(contact, part)
+                // Por WiFi local llega igual; por internet, al buzón personal.
+                if (lan?.send(contact.fingerprint, sealed) == true) ok = true
+                val event = makeTransportEvent(
+                    sealed, inbox, (System.currentTimeMillis() / 1000).toULong(),
+                )
+                if (nostr?.send(event) == true) ok = true
+            }
+        }
+        return ok
+    }
+
+    /**
+     * Alguien nos agregó y nos manda su invitación: lo damos de alta para que
+     * la conversación funcione en los dos sentidos.
+     *
+     * Solo puede llegar aquí quien tenga nuestra invitación, que es a quien se
+     * la dimos a propósito. Aun así se avisa al usuario, que siempre puede
+     * bloquear.
+     */
+    private fun handleContactRequest(payload: ByteArray) {
+        val invite = String(payload, Charsets.UTF_8).trim()
+        val contact = runCatching { inviteDecode(invite) }.getOrNull() ?: return
+        if (contact.fingerprint == myFingerprint) return
+        if (prefs.isBlocked(contact.fingerprint)) return
+
+        val nuevo = store.addContact(contact)
+        if (nuevo) {
+            refreshSubscriptions()
+            listeners.forEach { it.onContactAdded(contact) }
+            Log.d(TAG, "contacto añadido por solicitud: ${contact.fingerprint}")
+        }
+        notifyStateChanged()
     }
 
     // ---------- envío ----------
@@ -308,8 +378,13 @@ class Messenger(
             // Para todo lo demás exigimos conocer al remitente: solo así tenemos
             // su huella canónica (con espacios), que es la que indexa todo.
             if (senderContact == null) {
-                if (parsed.kind == Kind.GROUP_INVITE) {
-                    handleGroupControl(parsed.kind, "", assembled)
+                // Estos dos son los unicos que aceptamos de alguien que aun no
+                // tenemos guardado: ambos vienen sellados con nuestra clave
+                // publica, asi que quien los manda ya tenia nuestra invitacion.
+                when (parsed.kind) {
+                    Kind.CONTACT_REQUEST -> handleContactRequest(assembled)
+                    Kind.GROUP_INVITE -> handleGroupControl(parsed.kind, "", assembled)
+                    else -> Unit
                 }
                 return
             }
@@ -327,6 +402,12 @@ class Messenger(
             if (parsed.kind == Kind.RATCHET_INIT) {
                 acceptRatchetInit(senderFp, assembled)
                 drainPending(senderFp)
+                return
+            }
+
+            // Ya lo teniamos guardado: su solicitud solo confirma el alta mutua.
+            if (parsed.kind == Kind.CONTACT_REQUEST) {
+                handleContactRequest(assembled)
                 return
             }
 

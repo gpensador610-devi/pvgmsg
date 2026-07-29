@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.privmsg.app
 
 import androidx.activity.compose.BackHandler
@@ -9,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,13 +20,17 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -46,6 +53,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -70,7 +79,8 @@ fun ChatScreen(
     senderNameOf: (String) -> String,
     ttlLabel: String?,
     onSend: (String) -> Unit,
-    onAttachPhoto: () -> Unit,
+    onPickPhoto: () -> Unit,
+    onTakePhoto: () -> Unit,
     onToggleRecord: () -> Unit,
     onPlayAudio: (Msg) -> Unit,
     onCall: () -> Unit,
@@ -81,17 +91,34 @@ fun ChatScreen(
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val tap = rememberTapFeedback()
+    val focusManager = LocalFocusManager.current
+    val imeVisible = WindowInsets.isImeVisible
+    var showAttachOptions by remember { mutableStateOf(false) }
+
+    if (showAttachOptions) {
+        AttachOptionsDialog(
+            onDismiss = { showAttachOptions = false },
+            onCamera = { showAttachOptions = false; onTakePhoto() },
+            onGallery = { showAttachOptions = false; onPickPhoto() },
+        )
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
     }
 
+    // Al abrirse el teclado, seguir viendo el ultimo mensaje.
+    LaunchedEffect(imeVisible) {
+        if (imeVisible && messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    }
+
+    // union, no suma: con el teclado abierto el inset del teclado ya incluye
+    // la barra de navegacion. Sumar ambos empujaba la conversacion hacia
+    // arriba y dejaba el campo de texto casi en el techo de la pantalla.
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .imePadding(),
+            .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.ime)),
     ) {
         // Cabecera
         Surface(shadowElevation = 3.dp) {
@@ -134,13 +161,17 @@ fun ChatScreen(
             }
         }
 
-        // Mensajes
+        // Mensajes. Tocar la conversacion cierra el teclado, como en cualquier
+        // mensajeria: se toca para leer, no para escribir.
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)),
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { focusManager.clearFocus() })
+                },
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -165,8 +196,8 @@ fun ChatScreen(
                     .padding(8.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {
-                IconButton(onClick = onAttachPhoto) {
-                    Icon(AppIcons.Attach, contentDescription = "Adjuntar foto")
+                IconButton(onClick = { tap(); showAttachOptions = true }) {
+                    Icon(AppIcons.Attach, contentDescription = "Adjuntar")
                 }
                 OutlinedTextField(
                     value = draft,
@@ -197,6 +228,66 @@ fun ChatScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Cámara o galería, como en cualquier mensajería.
+ * Público para reutilizarlo también al elegir la foto de perfil.
+ */
+@Composable
+fun PhotoSourceDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    onCamera: () -> Unit,
+    onGallery: () -> Unit,
+) = AttachOptionsDialog(title, onDismiss, onCamera, onGallery)
+
+@Composable
+private fun AttachOptionsDialog(
+    title: String = "Enviar foto",
+    onDismiss: () -> Unit,
+    onCamera: () -> Unit,
+    onGallery: () -> Unit,
+) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        androidx.compose.material3.Card {
+            Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                AttachOption("📷", "Tomar una foto", "Abre la cámara ahora", onCamera)
+                AttachOption("🖼", "Elegir de la galería", "Fotos ya guardadas", onGallery)
+                Spacer(Modifier.height(4.dp))
+                androidx.compose.material3.TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .align(Alignment.End)
+                        .padding(horizontal = 12.dp),
+                ) { Text("Cancelar") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachOption(icon: String, title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(icon, style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.width(16.dp))
+        Column {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
