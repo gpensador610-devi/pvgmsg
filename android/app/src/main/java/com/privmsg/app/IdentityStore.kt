@@ -109,6 +109,11 @@ class IdentityStore(context: Context) {
         saveEntries(entries)
     }
 
+    /** Elimina un contacto de la agenda. */
+    fun removeContact(fingerprint: String) {
+        saveEntries(loadEntries().filterNot { it.contact.fingerprint == fingerprint })
+    }
+
     /** Guarda la foto de perfil que un contacto nos ha difundido. */
     fun setContactAvatar(fingerprint: String, jpeg: ByteArray) {
         val entries = loadEntries().map {

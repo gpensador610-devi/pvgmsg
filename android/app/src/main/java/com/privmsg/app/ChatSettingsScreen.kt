@@ -71,6 +71,7 @@ fun ChatSettingsScreen(
     onToggleBlock: () -> Unit,
     onLeaveGroup: () -> Unit,
     onClearHistory: () -> Unit,
+    onResetSession: () -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -237,6 +238,21 @@ fun ChatSettingsScreen(
                             .clickable(onClick = onClearHistory),
                     )
                     HorizontalDivider()
+                    if (!isGroup) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onResetSession),
+                        ) {
+                            Text("Reiniciar el cifrado", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "Si los mensajes dejan de llegar o no se pueden leer, esto " +
+                                    "negocia claves nuevas. No borra nada de lo que ya tienes.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        HorizontalDivider()
+                    }
                     if (isGroup) {
                         Text(
                             "Salir del grupo",

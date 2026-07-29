@@ -52,6 +52,7 @@ class Messenger(
     val prefs = ChatPrefs(appContext)
     val vault = MediaVault(appContext)
     val ratchets = RatchetStore(appContext)
+    val seen = SeenStore(appContext)
 
     private val assembler = ChunkAssembler()
     private val listeners = CopyOnWriteArrayList<MessengerListener>()
@@ -71,8 +72,15 @@ class Messenger(
         lan = LanTransport(appContext, identity.fingerprint) { handleSealed(it) }
             .also { it.start() }
         nostr = NostrTransport(
+            context = appContext,
             tagsProvider = { rendezvousTags() },
-            onSealedReceived = { handleSealed(it) },
+            sinceProvider = { seen.lastProcessedSeconds },
+            onSealedReceived = { sealed ->
+                handleSealed(sealed)
+                // Avanzar la marca para que la próxima reconexión no vuelva a
+                // pedir lo mismo.
+                nostr?.lastEventSeconds?.let { seen.lastProcessedSeconds = it }
+            },
         ).also { it.start() }
     }
 
@@ -86,6 +94,17 @@ class Messenger(
     fun peerOnLan(fingerprint: String): Boolean = lan?.peerVisible(fingerprint) == true
 
     fun refreshSubscriptions() = nostr?.resubscribe()
+
+    /**
+     * Al volver a primer plano se comprueba la conexión y se resuscribe.
+     * Android puede haber congelado los sockets mientras la app estaba en
+     * segundo plano sin llegar a cerrarlos, y entonces parecen vivos pero no
+     * entregan nada.
+     */
+    fun onAppForegrounded() {
+        val transport = nostr ?: return
+        if (transport.isOnline()) transport.resubscribe() else transport.reconnectAll()
+    }
 
     /**
      * Etiquetas que vigilamos en los relays.
@@ -211,9 +230,10 @@ class Messenger(
             ttlSeconds = ttlSeconds,
             msgId = msgId,
         )
-        return parts.all { part ->
+        val delivered = parts.all { part ->
             val sealed = sealMessage(recipient, part)
             var ok = lan?.send(recipient.fingerprint, sealed) ?: false
+            val byLan = ok
             if (!ok) {
                 val today = System.currentTimeMillis() / 1000 / 86400
                 val tag = rendezvousTag(identity, recipient, today.toULong())
@@ -222,8 +242,11 @@ class Messenger(
                 )
                 ok = nostr?.send(event) ?: false
             }
+            Log.d(TAG, "envio $kind a ${recipient.fingerprint.take(9)}: " +
+                if (ok) (if (byLan) "OK por WiFi" else "OK por relays") else "FALLO")
             ok
         }
+        return delivered
     }
 
     /** Envía a todos los miembros de un grupo. Basta con uno para darlo por enviado. */
@@ -276,15 +299,16 @@ class Messenger(
      * genera una semilla y se la manda **dentro del sobre híbrido**, que es de
      * donde el ratchet hereda la protección post-cuántica.
      */
-    private fun ensureRatchetSession(recipient: Contact): Unit? {
-        if (ratchets.has(recipient.fingerprint)) return Unit
+    private fun ensureRatchetSession(recipient: Contact, force: Boolean = false): Unit? {
+        if (!force && ratchets.has(recipient.fingerprint)) return Unit
 
         return runCatching {
             val seed = ByteArray(32).also { SecureRandom().nextBytes(it) }
             val init = ratchetInitInitiator(seed)
 
-            // La invitación lleva semilla + nuestra clave de ratchet inicial.
-            val payload = seed + init.data
+            // semilla + clave de ratchet inicial, y un byte final que marca si
+            // es una renegociación (ver acceptRatchetInit).
+            val payload = seed + init.data + byteArrayOf(if (force) FORCE_FLAG else 0)
             if (!dispatchRaw(recipient, Kind.RATCHET_INIT, payload)) {
                 error("no se pudo entregar el arranque de sesión")
             }
@@ -306,12 +330,23 @@ class Messenger(
             Log.w(TAG, "fallo al cifrar con ratchet para $fingerprint: ${it.message}")
         }.getOrNull()
 
+    /** Fallos de descifrado seguidos por contacto, para no reiniciar a la ligera. */
+    private val decryptFailures = ConcurrentHashMap<String, Int>()
+
     /**
-     * Descifra con el ratchet. Si falla, se descarta la sesión: el próximo
-     * mensaje que enviemos negociará una nueva y la conversación se recupera
-     * sola en vez de quedarse muda para siempre.
+     * Descifra con el ratchet.
+     *
+     * Un fallo aislado **no** reinicia la sesión: puede ser un mensaje viejo
+     * que se coló, o uno fuera de la ventana de claves guardadas. Reiniciar por
+     * eso rompería una conversación sana, que es exactamente lo que pasaba.
+     * Solo tras varios fallos seguidos se asume desincronización real.
+     *
+     * Y al asumirla, hay que **avisar al otro extremo**: si solo borráramos
+     * nuestra sesión, él seguiría cifrando con la suya y nosotros esperando un
+     * arranque que nunca llegaría. Eso deja la conversación muda para siempre.
      */
-    private fun ratchetOpen(fingerprint: String, payload: ByteArray): ByteArray? {
+    private fun ratchetOpen(sender: Contact, payload: ByteArray): ByteArray? {
+        val fingerprint = sender.fingerprint
         val result = runCatching {
             ratchets.withSession(fingerprint) { session ->
                 val out = ratchetDecrypt(session, payload)
@@ -319,11 +354,42 @@ class Messenger(
             }
         }.getOrNull()
 
-        if (result == null) {
-            Log.w(TAG, "sesión desincronizada con $fingerprint: se reiniciará")
-            ratchets.clear(fingerprint)
+        if (result != null) {
+            decryptFailures.remove(fingerprint)
+            return result
         }
-        return result
+
+        val failures = decryptFailures.merge(fingerprint, 1, Int::plus) ?: 1
+        if (failures >= MAX_DECRYPT_FAILURES) {
+            Log.w(TAG, "sesión desincronizada con $fingerprint: se renegocia")
+            ratchets.clear(fingerprint)
+            decryptFailures.remove(fingerprint)
+            renegotiate(sender)
+        } else {
+            Log.d(TAG, "mensaje ilegible de $fingerprint ($failures/$MAX_DECRYPT_FAILURES)")
+        }
+        return null
+    }
+
+    /** Último intento de renegociación por contacto, para no inundar. */
+    private val lastRenegotiation = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Arranca una sesión nueva con alguien, aunque ya tuviéramos una.
+     *
+     * Es lo que rompe el bloqueo mutuo: quien detecta que no puede leer toma
+     * la iniciativa en vez de esperar. Va limitado en frecuencia para que dos
+     * extremos confundidos no se pasen la vida renegociando.
+     */
+    private fun renegotiate(contact: Contact) {
+        val now = System.currentTimeMillis()
+        val last = lastRenegotiation[contact.fingerprint] ?: 0L
+        if (now - last < RENEGOTIATE_COOLDOWN_MS) return
+        lastRenegotiation[contact.fingerprint] = now
+
+        runCatching {
+            ensureRatchetSession(contact, force = true)
+        }.onFailure { Log.w(TAG, "no se pudo renegociar: ${it.message}") }
     }
 
     /**
@@ -333,10 +399,14 @@ class Messenger(
      * convergen en la misma sesión en vez de quedarse cruzados.
      */
     private fun acceptRatchetInit(senderFp: String, payload: ByteArray) {
-        if (payload.size != 64) return
+        if (payload.size < 64) return
 
+        // Una renegociación se acepta siempre: el otro nos está diciendo que no
+        // puede leernos. Si la rechazáramos por la regla anti-empate, los dos
+        // nos quedaríamos esperando y la conversación no se recuperaría nunca.
+        val forced = payload.size > 64 && payload[64] == FORCE_FLAG
         val theirsWins = senderFp.replace(" ", "") > myFingerprint.replace(" ", "")
-        if (ratchets.has(senderFp) && !theirsWins) {
+        if (!forced && ratchets.has(senderFp) && !theirsWins) {
             Log.d(TAG, "arranque simultáneo: conservamos nuestra sesión con $senderFp")
             return
         }
@@ -354,6 +424,19 @@ class Messenger(
     private fun handleSealed(sealed: ByteArray) {
         try {
             val parsed = Envelope.parse(openMessage(identity, sealed)) ?: return
+
+            // Antes que nada: descartar reenvíos. Los relays reentregan lo ya
+            // recibido al reconectar, y dejar que un mensaje viejo llegue al
+            // ratchet tumbaría una sesión que funciona.
+            //
+            // Se deduplica por fragmento, no por mensaje: así un archivo
+            // troceado también se descarta entero si vuelve a llegar.
+            val fragmentId = "${parsed.senderFp}:${parsed.msgId}:${parsed.index}"
+            if (seen.isDuplicate(fragmentId)) {
+                Log.d(TAG, "descartado repetido ${parsed.kind} de ${parsed.senderFp.take(9)}")
+                return
+            }
+            Log.d(TAG, "recibido ${parsed.kind} de ${parsed.senderFp.take(9)}")
 
             // ¿Quién lo manda? Puede ser un contacto directo o un miembro de grupo.
             val entry = store.loadEntries()
@@ -421,10 +504,13 @@ class Messenger(
             // guarda hasta que llegue el arranque en vez de perderse.
             if (!ratchets.has(senderFp)) {
                 bufferUntilSession(senderFp, Pending(parsed, senderContact, senderName, assembled))
+                // Si el arranque no llega (se perdió, o el otro cree tener una
+                // sesión que nosotros ya no tenemos), tomamos la iniciativa.
+                renegotiate(senderContact)
                 return
             }
 
-            val payload = ratchetOpen(senderFp, assembled) ?: return
+            val payload = ratchetOpen(senderContact, assembled) ?: return
             route(parsed.kind, senderContact, senderFp, senderName, payload, parsed)
         } catch (e: Exception) {
             // Blob que no era para nosotros o corrupto: se ignora en silencio.
@@ -457,7 +543,7 @@ class Messenger(
         val queue = pending.remove(senderFp) ?: return
         val items = synchronized(queue) { queue.toList() }
         items.forEach { item ->
-            val payload = ratchetOpen(senderFp, item.payload) ?: return@forEach
+            val payload = ratchetOpen(item.sender, item.payload) ?: return@forEach
             route(item.parsed.kind, item.sender, senderFp, item.senderName, payload, item.parsed)
         }
     }
@@ -610,6 +696,35 @@ class Messenger(
         notifyStateChanged()
     }
 
+    /**
+     * Elimina una conversación por completo: mensajes, medios, sesión de
+     * cifrado, ajustes y —si es un contacto directo— la propia entrada de la
+     * agenda. Un grupo se abandona avisando al resto.
+     *
+     * Solo afecta a este dispositivo: lo que el otro tenga en el suyo no se
+     * puede borrar desde aquí, y la app no finge lo contrario.
+     */
+    fun deleteChat(chatId: String) {
+        val group = groups.get(chatId)
+        if (group != null) {
+            leaveGroup(group)
+            return
+        }
+
+        // Borrar también los archivos, no solo las referencias.
+        messages.load(chatId)
+            .mapNotNull { it.mediaId.takeIf(String::isNotEmpty) }
+            .forEach { vault.delete(it) }
+
+        messages.clear(chatId)
+        ratchets.clear(chatId)
+        prefs.forget(chatId)
+        if (chatId != myFingerprint) store.removeContact(chatId)
+
+        refreshSubscriptions()
+        notifyStateChanged()
+    }
+
     // ---------- mantenimiento ----------
 
     /** Borra los mensajes caducados y los medios que quedaron huérfanos. */
@@ -627,5 +742,14 @@ class Messenger(
 
         /** Mensajes que se guardan por remitente mientras no hay sesión. */
         const val MAX_PENDING = 20
+
+        /** Fallos seguidos antes de dar una sesión por perdida. */
+        const val MAX_DECRYPT_FAILURES = 5
+
+        /** Marca de "renegociación forzada" al final del arranque de sesión. */
+        const val FORCE_FLAG: Byte = 1
+
+        /** Espera mínima entre renegociaciones con el mismo contacto. */
+        const val RENEGOTIATE_COOLDOWN_MS = 30_000L
     }
 }

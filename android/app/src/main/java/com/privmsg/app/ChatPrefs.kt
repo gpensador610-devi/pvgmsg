@@ -95,6 +95,17 @@ class ChatPrefs(context: Context) {
         prefs.edit().putString(soundKey(chatId), uri).apply()
     }
 
+    // ---- chats fijados ----
+
+    fun pinned(): Set<String> = prefs.getStringSet(KEY_PINNED, emptySet()) ?: emptySet()
+
+    fun isPinned(chatId: String): Boolean = chatId in pinned()
+
+    fun setPinned(chatId: String, pinned: Boolean) {
+        val updated = if (pinned) pinned() + chatId else pinned() - chatId
+        prefs.edit().putStringSet(KEY_PINNED, updated).apply()
+    }
+
     // ---- ajustes generales ----
 
     /** Tono por defecto para los chats que no tienen uno propio. */
@@ -151,6 +162,7 @@ class ChatPrefs(context: Context) {
             .remove(mutedKey(chatId))
             .remove(ttlKey(chatId))
             .remove(soundKey(chatId))
+            .putStringSet(KEY_PINNED, pinned() - chatId)
             .apply()
     }
 
@@ -161,6 +173,7 @@ class ChatPrefs(context: Context) {
 
     private companion object {
         const val KEY_BLOCKED = "blocked_v1"
+        const val KEY_PINNED = "pinned_v1"
         const val KEY_DEFAULT_SOUND = "default_sound_v1"
         const val KEY_DEFAULT_TTL = "default_ttl_v1"
         const val KEY_VIBRATE = "vibrate_v1"

@@ -88,7 +88,8 @@ fun ChatScreen(
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    var draft by remember { mutableStateOf("") }
+    // rememberSaveable: al girar la pantalla no se pierde lo ya escrito.
+    var draft by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
     val tap = rememberTapFeedback()
     val focusManager = LocalFocusManager.current

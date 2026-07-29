@@ -40,6 +40,7 @@
 
 # Quitar los logs de depuración del binario de release: no deben quedar
 # rastros de huellas ni de actividad de red en logcat.
+#
 -assumenosideeffects class android.util.Log {
     public static *** d(...);
     public static *** v(...);

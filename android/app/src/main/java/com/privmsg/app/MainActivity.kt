@@ -33,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,6 +76,34 @@ private sealed interface Screen {
     data class Chat(val chatId: String) : Screen
     data class ChatSettings(val chatId: String) : Screen
 }
+
+/**
+ * Permite que la pantalla actual sobreviva a girar el teléfono.
+ *
+ * Android destruye y recrea la Activity en cada rotación; sin esto, el usuario
+ * volvía siempre a la lista de chats. También cubre el caso de que el sistema
+ * mate el proceso por memoria y lo restaure después.
+ */
+private val ScreenSaver = androidx.compose.runtime.saveable.Saver<Screen, String>(
+    save = {
+        when (it) {
+            Screen.ChatList -> "list"
+            Screen.Settings -> "settings"
+            Screen.NewGroup -> "newgroup"
+            is Screen.Chat -> "chat:${it.chatId}"
+            is Screen.ChatSettings -> "chatprefs:${it.chatId}"
+        }
+    },
+    restore = {
+        when {
+            it == "settings" -> Screen.Settings
+            it == "newgroup" -> Screen.NewGroup
+            it.startsWith("chat:") -> Screen.Chat(it.removePrefix("chat:"))
+            it.startsWith("chatprefs:") -> Screen.ChatSettings(it.removePrefix("chatprefs:"))
+            else -> Screen.ChatList
+        }
+    },
+)
 
 // FragmentActivity (no ComponentActivity) porque BiometricPrompt lo exige.
 class MainActivity : FragmentActivity() {
@@ -308,6 +337,7 @@ class MainActivity : FragmentActivity() {
         super.onResume()
         AppState.appInForeground = true
         applyScreenSecurity()
+        if (::messenger.isInitialized) messenger.onAppForegrounded()
 
         // Bloqueo automático: solo si el usuario salió de verdad de la app.
         // Volver de la cámara o de la galería no cuenta.
@@ -426,7 +456,12 @@ class MainActivity : FragmentActivity() {
 
         NotificationHelper.ensureChannels(this, prefs)
         applyScreenSecurity()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        // Solo si falta: bootWith se ejecuta también al girar la pantalla, y
+        // no tiene sentido volver a pedirlo cada vez.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
             notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
         PrivMsgService.start(this)
@@ -705,7 +740,9 @@ class MainActivity : FragmentActivity() {
 
     @Composable
     private fun Root() {
-        var screen by remember { mutableStateOf<Screen>(Screen.ChatList) }
+        var screen by rememberSaveable(stateSaver = ScreenSaver) {
+            mutableStateOf<Screen>(Screen.ChatList)
+        }
         var showQr by remember { mutableStateOf(false) }
         var showMnemonic by remember { mutableStateOf(false) }
         var editingProfile by remember { mutableStateOf(false) }
@@ -830,6 +867,14 @@ class MainActivity : FragmentActivity() {
                 onNewGroup = { screen = Screen.NewGroup },
                 onPasteInvite = { pastingInvite = true },
                 onSettings = { screen = Screen.Settings },
+                onTogglePin = { chatId ->
+                    prefs.setPinned(chatId, !prefs.isPinned(chatId))
+                    refreshTick.longValue++
+                },
+                onDeleteChat = { chatId ->
+                    messenger.deleteChat(chatId)
+                    toast("Chat eliminado")
+                },
             )
 
             is Screen.NewGroup -> NewGroupScreen(
@@ -944,6 +989,10 @@ class MainActivity : FragmentActivity() {
                         msgStore.clear(chatId)
                         refreshTick.longValue++
                         toast("Historial borrado")
+                    },
+                    onResetSession = {
+                        messenger.ratchets.clear(chatId)
+                        toast("Cifrado reiniciado. Envía un mensaje para renegociar.")
                     },
                     onBack = { screen = Screen.Chat(chatId) },
                 )
@@ -1163,7 +1212,13 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    /** Construye las filas de la lista: nota personal, grupos y contactos. */
+    /**
+     * Filas de la lista: nota personal, grupos y contactos.
+     *
+     * Orden como en cualquier mensajería: primero los fijados, y dentro de
+     * cada bloque el que tenga el mensaje más reciente. La nota personal no se
+     * fija sola pero participa del mismo orden.
+     */
     private fun buildChatRows(entries: List<ContactEntry>, groups: List<Group>): List<ChatRow> =
         buildList {
             add(
@@ -1175,6 +1230,7 @@ class MainActivity : FragmentActivity() {
                     isSelf = true,
                     isGroup = false,
                     muted = false,
+                    pinned = prefs.isPinned(identity.fingerprint),
                     ttlLabel = null,
                     photo = store.getProfileAvatar(),
                 ),
@@ -1190,6 +1246,7 @@ class MainActivity : FragmentActivity() {
                         isSelf = false,
                         isGroup = true,
                         muted = settings.muted,
+                        pinned = prefs.isPinned(group.id),
                         ttlLabel = settings.effectiveTtl.takeIf { it != Ttl.OFF }?.label,
                         photo = group.avatar,
                     ),
@@ -1211,12 +1268,15 @@ class MainActivity : FragmentActivity() {
                         isSelf = false,
                         isGroup = false,
                         muted = settings.muted,
+                        pinned = prefs.isPinned(fp),
                         ttlLabel = settings.effectiveTtl.takeIf { it != Ttl.OFF }?.label,
                         photo = entry.avatar,
                     ),
                 )
             }
-        }
+        }.sortedWith(
+            compareByDescending<ChatRow> { it.pinned }.thenByDescending { it.sortKey },
+        )
 
     private fun launchScanner(onAdded: (String) -> Unit) {
         onContactScanned = { contact ->
