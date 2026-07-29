@@ -12,6 +12,7 @@ keystore.properties
 # ─── Build ──────────────────────────────────────────────────────────────
 build/
 .gradle/
+.kotlin/
 local.properties
 target/
 *.apk
