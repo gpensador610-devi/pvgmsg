@@ -555,6 +555,7 @@ class MainActivity : FragmentActivity() {
         var namingFingerprint by remember { mutableStateOf<String?>(null) }
         var settingUpPin by remember { mutableStateOf(false) }
         var settingUpDuress by remember { mutableStateOf(false) }
+        var pastingInvite by remember { mutableStateOf(false) }
         val tick by refreshTick
 
         // Crear o cambiar PIN: tapa la pantalla igual que el desbloqueo.
@@ -660,6 +661,7 @@ class MainActivity : FragmentActivity() {
                 onShowQr = { showQr = true },
                 onScan = { launchScanner { fp -> namingFingerprint = fp } },
                 onNewGroup = { screen = Screen.NewGroup },
+                onPasteInvite = { pastingInvite = true },
                 onSettings = { screen = Screen.Settings },
             )
 
@@ -861,6 +863,28 @@ class MainActivity : FragmentActivity() {
             QrDialog { showQr = false }
         }
 
+        if (pastingInvite) {
+            PasteInviteDialog(
+                onDismiss = { pastingInvite = false },
+                onConfirm = { text ->
+                    try {
+                        val contact = inviteDecode(text.trim())
+                        if (store.addContact(contact)) {
+                            messenger.refreshSubscriptions()
+                            pastingInvite = false
+                            namingFingerprint = contact.fingerprint
+                        } else {
+                            toast("Ese contacto ya existe")
+                            pastingInvite = false
+                        }
+                        refreshTick.longValue++
+                    } catch (e: CoreException) {
+                        toast("Invitación inválida: revisa que esté completa")
+                    }
+                },
+            )
+        }
+
         setupStep?.let { step ->
             BackgroundSetupDialog(
                 step = step,
@@ -1051,15 +1075,18 @@ class MainActivity : FragmentActivity() {
 
     @Composable
     private fun QrDialog(onDismiss: () -> Unit) {
+        val invite = remember { inviteEncode(identity) }
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+
         Dialog(onDismissRequest = onDismiss) {
             Card {
                 Column(
                     modifier = Modifier.padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Text("Tu invitación", style = MaterialTheme.typography.titleMedium)
-                    val qr: Bitmap = remember { QrUtil.generate(inviteEncode(identity)) }
+                    val qr: Bitmap = remember { QrUtil.generate(invite) }
                     Image(
                         bitmap = qr.asImageBitmap(),
                         contentDescription = "QR de invitación",
@@ -1072,8 +1099,100 @@ class MainActivity : FragmentActivity() {
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Si no pueden escanear, comparte el texto y que lo peguen.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = {
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(invite))
+                            toast("Invitación copiada")
+                        }) { Text("Copiar") }
+                        OutlinedButton(onClick = { shareInvite(invite) }) { Text("Compartir") }
+                    }
                     Button(onClick = onDismiss) { Text("Cerrar") }
+                }
+            }
+        }
+    }
+
+    /** Comparte la invitación por cualquier app (correo, otra mensajería, etc.). */
+    private fun shareInvite(invite: String) {
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(android.content.Intent.EXTRA_SUBJECT, "Mi invitación de PrivMsg")
+            putExtra(
+                android.content.Intent.EXTRA_TEXT,
+                "Añádeme en PrivMsg pegando esto:\n\n$invite\n\n" +
+                    "Mi huella de seguridad: ${identity.fingerprint}",
+            )
+        }
+        runCatching { startActivity(android.content.Intent.createChooser(intent, "Compartir invitación")) }
+            .onFailure { toast("No se pudo compartir") }
+    }
+
+    /**
+     * Añadir contacto pegando el texto de la invitación.
+     *
+     * El QR es lo cómodo cara a cara, pero no siempre hay cámara (emuladores,
+     * tablets sin cámara trasera) ni es práctico. La invitación es solo texto:
+     * claves públicas, nada secreto, así que puede viajar por cualquier canal.
+     */
+    @Composable
+    private fun PasteInviteDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+        var text by remember { mutableStateOf("") }
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+
+        Dialog(onDismissRequest = onDismiss) {
+            Card {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        "Añadir contacto",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "Pega aquí la invitación que te pasaron. Empieza por «privmsg:».",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        placeholder = { Text("privmsg:...") },
+                        maxLines = 4,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            clipboard.getText()?.text?.let { text = it }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Pegar del portapapeles") }
+
+                    Text(
+                        "La invitación solo contiene claves públicas: puede viajar por " +
+                            "cualquier canal sin riesgo. Verifica la huella con esa persona " +
+                            "por otro medio antes de confiar en ella.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        OutlinedButton(onClick = onDismiss) { Text("Cancelar") }
+                        Button(
+                            onClick = { onConfirm(text) },
+                            enabled = text.trim().startsWith("privmsg:"),
+                        ) { Text("Añadir") }
+                    }
                 }
             }
         }

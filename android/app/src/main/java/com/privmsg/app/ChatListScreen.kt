@@ -56,6 +56,7 @@ fun ChatListScreen(
     onShowQr: () -> Unit,
     onScan: () -> Unit,
     onNewGroup: () -> Unit,
+    onPasteInvite: () -> Unit,
     onSettings: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -83,6 +84,10 @@ fun ChatListScreen(
                         DropdownMenuItem(
                             text = { Text("Nuevo grupo") },
                             onClick = { menuOpen = false; onNewGroup() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Añadir pegando invitación") },
+                            onClick = { menuOpen = false; onPasteInvite() },
                         )
                         DropdownMenuItem(
                             text = { Text("Ajustes") },

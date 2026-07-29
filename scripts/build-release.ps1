@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $android = Join-Path $root "android"
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot"
+# apksigner.bat necesita `java` en el PATH, no le basta con JAVA_HOME.
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 
 if (-not (Test-Path (Join-Path $android "keystore.properties"))) {
     Write-Host "FALTA android\keystore.properties: el APK saldria SIN FIRMAR." -ForegroundColor Red
