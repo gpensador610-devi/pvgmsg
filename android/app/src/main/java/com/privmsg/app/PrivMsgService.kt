@@ -193,4 +193,26 @@ object AppState {
 
     @Volatile var appInForeground: Boolean = false
     @Volatile var visibleChatId: String? = null
+
+    // ---- estado del bloqueo, a nivel de proceso ----
+    //
+    // Vive aquí y no en la Activity porque al girar la pantalla Android
+    // destruye y recrea la Activity: si el estado viviera allí, cada rotación
+    // volvería a pedir el PIN.
+
+    /** ¿Hay que pedir PIN/huella antes de mostrar nada? */
+    val locked = androidx.compose.runtime.mutableStateOf(false)
+
+    /** Para no reevaluar el bloqueo en cada recreación de la Activity. */
+    @Volatile var lockInitialized: Boolean = false
+
+    /** Instante en que la app pasó realmente a segundo plano. */
+    @Volatile var backgroundedAt: Long = 0L
+
+    /**
+     * La app abrió otra pantalla del sistema a propósito (cámara, galería,
+     * selector de tono, gestor de archivos). Eso pausa la Activity pero **no
+     * es salir de la app**, así que no debe disparar el bloqueo.
+     */
+    @Volatile var expectingExternalResult: Boolean = false
 }

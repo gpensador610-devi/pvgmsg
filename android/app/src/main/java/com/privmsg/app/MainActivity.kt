@@ -84,11 +84,8 @@ class MainActivity : FragmentActivity() {
     private lateinit var calls: CallManager
     private lateinit var appLock: AppLock
 
-    /** ¿Hay que pedir PIN/huella antes de mostrar nada? */
-    private val locked = mutableStateOf(false)
-
-    /** Instante en que la app pasó a segundo plano, para el bloqueo automático. */
-    private var backgroundedAt = 0L
+    /** El estado del bloqueo vive en AppState para sobrevivir a las rotaciones. */
+    private val locked get() = AppState.locked
     private val player = AudioPlayer()
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -281,7 +278,13 @@ class MainActivity : FragmentActivity() {
 
         recorder = AudioRecorder(applicationContext)
         appLock = AppLock(applicationContext)
-        locked.value = appLock.isEnabled
+
+        // Solo al arrancar el proceso. Si se evaluara en cada onCreate, girar
+        // la pantalla volvería a bloquear la app.
+        if (!AppState.lockInitialized) {
+            locked.value = appLock.isEnabled
+            AppState.lockInitialized = true
+        }
 
         val existing = IdentityStore(applicationContext).loadIdentity()
         if (existing != null) {
@@ -306,13 +309,16 @@ class MainActivity : FragmentActivity() {
         AppState.appInForeground = true
         applyScreenSecurity()
 
-        // Bloqueo automático: si estuvo fuera más de lo configurado, se cierra.
-        if (appLock.isEnabled && !locked.value && backgroundedAt > 0) {
-            if (System.currentTimeMillis() - backgroundedAt >= appLock.timeout.millis) {
+        // Bloqueo automático: solo si el usuario salió de verdad de la app.
+        // Volver de la cámara o de la galería no cuenta.
+        if (AppState.expectingExternalResult) {
+            AppState.expectingExternalResult = false
+        } else if (appLock.isEnabled && !locked.value && AppState.backgroundedAt > 0) {
+            if (System.currentTimeMillis() - AppState.backgroundedAt >= appLock.timeout.millis) {
                 locked.value = true
             }
         }
-        backgroundedAt = 0L
+        AppState.backgroundedAt = 0L
     }
 
     /** Pantalla de bloqueo: nada del contenido se ve hasta pasar de aquí. */
@@ -377,8 +383,22 @@ class MainActivity : FragmentActivity() {
 
     override fun onPause() {
         AppState.appInForeground = false
-        backgroundedAt = System.currentTimeMillis()
+        // Girar la pantalla destruye y recrea la Activity, pero el usuario no
+        // se fue a ningún lado: no debe contar como salir de la app.
+        if (!isChangingConfigurations && !AppState.expectingExternalResult) {
+            AppState.backgroundedAt = System.currentTimeMillis()
+        }
         super.onPause()
+    }
+
+    /**
+     * Abre una pantalla del sistema (cámara, galería, ajustes…) sin que eso
+     * dispare el bloqueo automático al volver.
+     */
+    private inline fun launchExternal(block: () -> Unit) {
+        AppState.expectingExternalResult = true
+        val ok = runCatching { block() }.isSuccess
+        if (!ok) AppState.expectingExternalResult = false
     }
 
     override fun onDestroy() {
@@ -549,7 +569,9 @@ class MainActivity : FragmentActivity() {
     private fun pickPhotoFor(chatId: String) {
         pendingAttachTarget = chatId
         pickingProfilePhoto = false
-        photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        launchExternal {
+            photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
     }
 
     /**
@@ -579,7 +601,7 @@ class MainActivity : FragmentActivity() {
                 this, "$packageName.fileprovider", file,
             )
             pendingCameraUri = uri
-            cameraLauncher.launch(uri)
+            launchExternal { cameraLauncher.launch(uri) }
         }
         if (result.isFailure) {
             pendingAttachTarget = null
@@ -591,7 +613,9 @@ class MainActivity : FragmentActivity() {
     private fun pickProfilePhoto() {
         pendingAttachTarget = null
         pickingProfilePhoto = true
-        photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        launchExternal {
+            photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
     }
 
     /** Foto de perfil tomada con la cámara en ese momento. */
@@ -619,8 +643,7 @@ class MainActivity : FragmentActivity() {
                 putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, Uri.parse(current))
             }
         }
-        runCatching { ringtonePicker.launch(intent) }
-            .onFailure { toast("No hay selector de tonos en este dispositivo") }
+        launchExternal { ringtonePicker.launch(intent) }
     }
 
     private fun toggleRecording(chatId: String) {
@@ -830,7 +853,7 @@ class MainActivity : FragmentActivity() {
                 blockedCount = prefs.blocked().size,
                 batteryOptimized = remember(tick) { !BackgroundPermissions.isExempt(this@MainActivity) },
                 oemGuide = remember { BackgroundPermissions.guide() },
-                onOpenOemAutostart = { BackgroundPermissions.openOemScreen(this) },
+                onOpenOemAutostart = { launchExternal { BackgroundPermissions.openOemScreen(this) } },
                 screenSecurity = prefs.screenSecurity(),
                 lockEnabled = remember(tick) { appLock.isEnabled },
                 lockTimeout = remember(tick) { appLock.timeout },
@@ -870,19 +893,17 @@ class MainActivity : FragmentActivity() {
                     prefs.setDefaultTtl(it.seconds)
                     refreshTick.longValue++
                 },
-                onRequestBatteryExemption = { BackgroundPermissions.requestExemption(this) },
+                onRequestBatteryExemption = { launchExternal { BackgroundPermissions.requestExemption(this) } },
                 onEditProfile = { editingProfile = true },
                 onChangePhoto = { choosingProfilePhoto = true },
                 onShowQr = { showQr = true },
                 onShowMnemonic = { showMnemonic = true },
                 onPickDefaultSound = { pickSound(null) },
                 onExportBackup = {
-                    runCatching { backupExporter.launch(BackupManager.suggestedFileName()) }
-                        .onFailure { toast("No hay gestor de archivos disponible") }
+                    launchExternal { backupExporter.launch(BackupManager.suggestedFileName()) }
                 },
                 onImportBackup = {
-                    runCatching { backupImporter.launch(arrayOf("*/*")) }
-                        .onFailure { toast("No hay gestor de archivos disponible") }
+                    launchExternal { backupImporter.launch(arrayOf("*/*")) }
                 },
                 onBack = { screen = Screen.ChatList },
             )
@@ -1038,7 +1059,7 @@ class MainActivity : FragmentActivity() {
                 onAccept = {
                     when (step) {
                         BackgroundSetupStep.BATTERY -> {
-                            BackgroundPermissions.requestExemption(this)
+                            launchExternal { BackgroundPermissions.requestExemption(this) }
                             // Tras la batería, las capas agresivas piden un paso más.
                             setupStep = if (oemGuide != null) {
                                 BackgroundSetupStep.AUTOSTART
@@ -1048,7 +1069,7 @@ class MainActivity : FragmentActivity() {
                             }
                         }
                         BackgroundSetupStep.AUTOSTART -> {
-                            BackgroundPermissions.openOemScreen(this)
+                            launchExternal { BackgroundPermissions.openOemScreen(this) }
                             prefs.markBackgroundSetupDone()
                             setupStep = null
                         }
@@ -1208,14 +1229,16 @@ class MainActivity : FragmentActivity() {
             }
             refreshTick.longValue++
         }
-        scanLauncher.launch(
-            ScanOptions()
-                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("")
-                .setBeepEnabled(false)
-                .setOrientationLocked(true)
-                .setCaptureActivity(PortraitCaptureActivity::class.java),
-        )
+        launchExternal {
+            scanLauncher.launch(
+                ScanOptions()
+                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    .setPrompt("")
+                    .setBeepEnabled(false)
+                    .setOrientationLocked(true)
+                    .setCaptureActivity(PortraitCaptureActivity::class.java),
+            )
+        }
     }
 
     // ---- diálogos ----
@@ -1274,8 +1297,9 @@ class MainActivity : FragmentActivity() {
                     "Mi huella de seguridad: ${identity.fingerprint}",
             )
         }
-        runCatching { startActivity(android.content.Intent.createChooser(intent, "Compartir invitación")) }
-            .onFailure { toast("No se pudo compartir") }
+        launchExternal {
+            startActivity(android.content.Intent.createChooser(intent, "Compartir invitación"))
+        }
     }
 
     /**
